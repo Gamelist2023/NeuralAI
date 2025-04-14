@@ -1,4 +1,3 @@
 venv
-src/Module/g4f
 src/har_and_cookies/*.json
 src/har_and_cookies/*.har
