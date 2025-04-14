@@ -42,7 +42,7 @@ app = FastAPI(
 
 
 class ChatRequest(BaseModel):
-    provider_name: str
+    provider_name: Optional[str] = None
     model: str
     message: str
     auth_key: Optional[str] = None
@@ -54,7 +54,10 @@ class ModelListRequest(BaseModel):
 
 
 async def run_g4f_task(
-    func, provider_class: Type[BaseProvider], model_name: str, message_content: str
+    func,
+    provider_class: Optional[Type[BaseProvider]],
+    model_name: str,
+    message_content: str,
 ):
     """ブロッキングする可能性のある関数を別スレッドで実行します (非ストリーミング用)。"""
     try:
@@ -63,7 +66,7 @@ async def run_g4f_task(
         )
     except Exception as e:
         print(
-            f"g4f操作中にエラーが発生しました (非ストリーミング, Provider: {provider_class.__name__}, Model: {model_name}): {e}"
+            f"g4f操作中にエラーが発生しました (非ストリーミング, Provider: {provider_class.__name__ if provider_class else 'None'}, Model: {model_name}): {e}"
         )
         traceback.print_exc()
         if isinstance(e, ProviderNotFoundError):
@@ -78,10 +81,10 @@ async def run_g4f_task(
 
 
 async def stream_response_generator(
-    prov_class: Type[BaseProvider], model_name: str, message_content: str
+    prov_class: Optional[Type[BaseProvider]], model_name: str, message_content: str
 ):
     """g4fからのストリーミング応答をSSE形式で生成する非同期ジェネレータ。"""
-    client = Client(provider=prov_class)
+    client = Client(provider=prov_class if prov_class else None)
     try:
         stream = client.chat.completions.create(
             model=model_name,
@@ -101,11 +104,15 @@ async def stream_response_generator(
 
     except Exception as e:
         print(
-            f"ストリーミングエラー (Provider: {prov_class.__name__}, Model: {model_name}): {e}"
+            f"ストリーミングエラー (Provider: {prov_class.__name__ if prov_class else 'None'}, Model: {model_name}): {e}"
         )
         traceback.print_exc()
         error_payload = json.dumps(
-            {"error": str(e), "provider": prov_class.__name__, "model": model_name},
+            {
+                "error": str(e),
+                "provider": prov_class.__name__ if prov_class else "None",
+                "model": model_name,
+            },
             ensure_ascii=False,
         )
         yield f"event: error\ndata: {error_payload}\n\n"
@@ -133,13 +140,17 @@ async def chat_with_ai(request_data: ChatRequest):
         f"チャットリクエスト受信 (Provider: {request_data.provider_name}, Model: {request_data.model}, Stream: {request_data.stream})"
     )
 
-    provider_class = ProviderUtils.convert.get(request_data.provider_name)
-    if not provider_class:
-        available_providers = list(ProviderUtils.convert.keys())
-        raise HTTPException(
-            status_code=400,
-            detail=f"指定されたProvider名 '{request_data.provider_name}' は無効です。利用可能なProvider: {available_providers}",
-        )
+    provider_class = (
+        ProviderUtils.convert.get(request_data.provider_name)
+        if request_data.provider_name
+        else None
+    )
+    # if not provider_class:
+    #    available_providers = list(ProviderUtils.convert.keys())
+    #    raise HTTPException(
+    #        status_code=400,
+    #        detail=f"指定されたProvider名 '{request_data.provider_name}' は無効です。利用可能なProvider: {available_providers}",
+    #    )
 
     if request_data.stream:
         print("ストリーミング応答を開始します...")
@@ -154,9 +165,11 @@ async def chat_with_ai(request_data: ChatRequest):
         print("非ストリーミング応答を生成します...")
 
         def create_completion_sync(
-            prov_class: Type[BaseProvider], model_name: str, message_content: str
+            prov_class: Optional[Type[BaseProvider]],
+            model_name: str,
+            message_content: str,
         ):
-            client = Client(provider=prov_class)
+            client = Client(provider=prov_class if prov_class else None)
             try:
                 response = client.chat.completions.create(
                     model=model_name,
@@ -167,20 +180,20 @@ async def chat_with_ai(request_data: ChatRequest):
                     return response.choices[0].message.content
                 else:
                     print(
-                        f"警告: Provider '{prov_class.__name__}' から予期しない応答形式 (非ストリーミング)。"
+                        f"警告: Provider '{prov_class.__name__ if prov_class else 'None'}' から予期しない応答形式 (非ストリーミング)。"
                     )
                     return None
             except ProviderNotFoundError as e:
                 print(
-                    f"Provider '{prov_class.__name__}' 内でエラー (非ストリーミング): {e}"
+                    f"Provider '{prov_class.__name__ if prov_class else 'None'}' 内でエラー (非ストリーミング): {e}"
                 )
                 traceback.print_exc()
                 raise ProviderNotFoundError(
-                    f"Provider '{prov_class.__name__}' 内でモデル '{model_name}' が見つからないか、エラーが発生しました: {e}"
+                    f"Provider '{prov_class.__name__ if prov_class else 'None'}' 内でモデル '{model_name}' が見つからないか、エラーが発生しました: {e}"
                 )
             except Exception as e:
                 print(
-                    f"client.chat.completions.create中にエラー発生 (非ストリーミング, Provider: {prov_class.__name__}, Model: {model_name}): {e}"
+                    f"client.chat.completions.create中にエラー発生 (非ストリーミング, Provider: {prov_class.__name__ if prov_class else 'None'}, Model: {model_name}): {e}"
                 )
                 traceback.print_exc()
                 raise e
