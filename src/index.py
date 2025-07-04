@@ -1,7 +1,7 @@
 import asyncio
 import os
 from Module.g4f.client import Client
-from Module.g4f.Provider import Grok
+from Module.g4f.Provider import Grok, You
 import Module.g4f.debug
 from Module.g4f.cookies import set_cookies_dir, read_cookie_files
 
@@ -13,11 +13,11 @@ read_cookie_files(cookies_dir)
 
 def main():
     client = Client(
-        provider=Grok
+        provider=You
     )
     response = client.chat.completions.create(
-        model="grok-3",
-        messages=[{"role": "user", "content": "こんにちは！今話題のXについて教えてください。！！"}],
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "こんにちは！あなたの名前は？"}],
     )
     
     print(response.choices[0].message.content)

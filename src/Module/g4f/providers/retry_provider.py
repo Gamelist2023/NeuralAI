@@ -4,14 +4,14 @@ import random
 
 from ..typing import Type, List, CreateResult, Messages, AsyncResult
 from .types import BaseProvider, BaseRetryProvider, ProviderType
-from .response import MediaResponse, ProviderInfo
+from .response import ProviderInfo, JsonConversation, is_content
 from .. import debug
-from ..errors import RetryProviderError, RetryNoProviderError
+from ..errors import RetryProviderError, RetryNoProviderError, MissingAuthError, NoValidHarFileError
 
 class IterListProvider(BaseRetryProvider):
     def __init__(
         self,
-        providers: List[Type[BaseProvider]],
+        providers: List[Type[BaseProvider]] = [],
         shuffle: bool = True
     ) -> None:
         """
@@ -34,6 +34,7 @@ class IterListProvider(BaseRetryProvider):
         stream: bool = False,
         ignore_stream: bool = False,
         ignored: list[str] = [],
+        api_key: str = None,
         **kwargs,
     ) -> CreateResult:
         """
@@ -49,23 +50,35 @@ class IterListProvider(BaseRetryProvider):
         """
         exceptions = {}
         started: bool = False
-
         for provider in self.get_providers(stream and not ignore_stream, ignored):
             self.last_provider = provider
-            debug.log(f"Using {provider.__name__} provider")
-            yield ProviderInfo(**provider.get_dict(), model=model if model else getattr(provider, "default_model"))
+            alias = model
+            if not model:
+                alias = getattr(provider, "default_model", None)
+            if hasattr(provider, "model_aliases"):
+                alias = provider.model_aliases.get(model, model)
+            if isinstance(alias, list):
+                alias = random.choice(alias)
+            debug.log(f"Using provider: {provider.__name__} with model: {alias}")
+            yield ProviderInfo(**provider.get_dict(), model=alias)
+            extra_body = kwargs.copy()
+            if isinstance(api_key, dict):
+                api_key = api_key.get(provider.get_parent())
+            if api_key:
+                extra_body["api_key"] = api_key
+                debug.log(f"Using API key for provider: {provider.__name__}")
             try:
-                response = provider.get_create_function()(model, messages, stream=stream, **kwargs)
+                response = provider.create_function(alias, messages, stream=stream, **extra_body)
                 for chunk in response:
                     if chunk:
                         yield chunk
-                        if isinstance(chunk, (str, MediaResponse)):
+                        if is_content(chunk):
                             started = True
                 if started:
                     return
             except Exception as e:
                 exceptions[provider.__name__] = e
-                debug.error(f"{provider.__name__} {type(e).__name__}: {e}")
+                debug.error(f"{provider.__name__}:", e)
                 if started:
                     raise e
                 yield e
@@ -79,6 +92,8 @@ class IterListProvider(BaseRetryProvider):
         stream: bool = True,
         ignore_stream: bool = False,
         ignored: list[str] = [],
+        api_key: str = None,
+        conversation: JsonConversation = None,
         **kwargs
     ) -> AsyncResult:
         exceptions = {}
@@ -86,15 +101,35 @@ class IterListProvider(BaseRetryProvider):
 
         for provider in self.get_providers(stream and not ignore_stream, ignored):
             self.last_provider = provider
-            debug.log(f"Using {provider.__name__} provider")
-            yield ProviderInfo(**provider.get_dict(), model=model if model else getattr(provider, "default_model"))
+            alias = model
+            if not model:
+                alias = getattr(provider, "default_model", None)
+            if hasattr(provider, "model_aliases"):
+                alias = provider.model_aliases.get(model, model)
+            if isinstance(alias, list):
+                alias = random.choice(alias)
+            debug.log(f"Using {provider.__name__} provider with model {alias}")
+            yield ProviderInfo(**provider.get_dict(), model=alias)
+            extra_body = kwargs.copy()
+            if isinstance(api_key, dict):
+                api_key = api_key.get(provider.get_parent())
+            if api_key:
+                debug.log(f"Using API key for provider: {provider.__name__}")
+                extra_body["api_key"] = api_key
+            if conversation is not None and hasattr(conversation, provider.__name__):
+                extra_body["conversation"] = JsonConversation(**getattr(conversation, provider.__name__))
             try:
-                response = provider.get_async_create_function()(model, messages, stream=stream, **kwargs)
+                response = provider.async_create_function(model, messages, stream=stream, **extra_body)
                 if hasattr(response, "__aiter__"):
                     async for chunk in response:
-                        if chunk:
+                        if isinstance(chunk, JsonConversation):
+                            if conversation is None:
+                                conversation = JsonConversation()
+                            setattr(conversation, provider.__name__, chunk.get_dict())
+                            yield conversation
+                        elif chunk:
                             yield chunk
-                            if isinstance(chunk, (str, MediaResponse)):
+                            if is_content(chunk):
                                 started = True
                 elif response:
                     response = await response
@@ -105,18 +140,15 @@ class IterListProvider(BaseRetryProvider):
                     return
             except Exception as e:
                 exceptions[provider.__name__] = e
-                debug.error(f"{provider.__name__} {type(e).__name__}: {e}")
+                debug.error(f"{provider.__name__}:", e)
                 if started:
                     raise e
                 yield e
 
         raise_exceptions(exceptions)
 
-    def get_create_function(self) -> callable:
-        return self.create_completion
-
-    def get_async_create_function(self) -> callable:
-        return self.create_async_generator
+    create_function = create_completion
+    async_create_function = create_async_generator
 
     def get_providers(self, stream: bool, ignored: list[str]) -> list[ProviderType]:
         providers = [p for p in self.providers if (p.supports_stream or not stream) and p.__name__ not in ignored]
@@ -171,10 +203,10 @@ class RetryProvider(IterListProvider):
                 try:
                     if debug.logging:
                         print(f"Using {provider.__name__} provider (attempt {attempt + 1})")
-                    response = provider.get_create_function()(model, messages, stream=stream, **kwargs)
+                    response = provider.create_function(model, messages, stream=stream, **kwargs)
                     for chunk in response:
-                        if isinstance(chunk, str) or isinstance(chunk, ImageResponse):
-                            yield chunk
+                        yield chunk
+                        if is_content(chunk):
                             started = True
                     if started:
                         return
@@ -204,11 +236,11 @@ class RetryProvider(IterListProvider):
             for attempt in range(self.max_retries):
                 try:
                     debug.log(f"Using {provider.__name__} provider (attempt {attempt + 1})")
-                    response = provider.get_async_create_function()(model, messages, stream=stream, **kwargs)
+                    response = provider.async_create_function(model, messages, stream=stream, **kwargs)
                     if hasattr(response, "__aiter__"):
                         async for chunk in response:
-                            if isinstance(chunk, str) or isinstance(chunk, ImageResponse):
-                                yield chunk
+                            yield chunk
+                            if is_content(chunk):
                                 started = True
                     else:
                         response = await response
@@ -235,8 +267,13 @@ def raise_exceptions(exceptions: dict) -> None:
         RetryNoProviderError: If no provider is found.
     """
     if exceptions:
+        for provider_name, e in exceptions.items():
+            if isinstance(e, (MissingAuthError, NoValidHarFileError)):
+                raise e
+        if len(exceptions) == 1:
+            raise list(exceptions.values())[0]
         raise RetryProviderError("RetryProvider failed:\n" + "\n".join([
             f"{p}: {type(exception).__name__}: {exception}" for p, exception in exceptions.items()
-        ]))
+        ])) from list(exceptions.values())[0]
 
     raise RetryNoProviderError("No provider found")

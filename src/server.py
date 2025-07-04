@@ -492,6 +492,9 @@ async def process_request(request_data: ChatRequest):
                     status_code=400,
                     detail=f"指定されたProvider名 '{request_data.provider_name}' は無効です。利用可能なProvider: {available_providers}",
                 )
+            # 型がクラスでなければクラス型に変換
+            if provider_class is not None and not isinstance(provider_class, type):
+                provider_class = type(provider_class)
 
         if request_data.stream:
             print("チャットストリーミング応答を開始します...")

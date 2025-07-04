@@ -4,7 +4,14 @@ import re
 import base64
 from typing import Union, Dict, List, Optional
 from abc import abstractmethod
-from urllib.parse import quote_plus, unquote_plus
+from urllib.parse import quote, unquote
+
+def is_content(chunk):
+    if isinstance(chunk, Reasoning):
+        if chunk.is_thinking is None and chunk.token is None:
+            return False
+        return True
+    return isinstance(chunk, (str, MediaResponse, AudioResponse, ToolCalls))
 
 def quote_url(url: str) -> str:
     """
@@ -18,12 +25,12 @@ def quote_url(url: str) -> str:
     """
     # Only unquote if needed to avoid double-unquoting
     if '%' in url:
-        url = unquote_plus(url)
+        url = unquote(url)
 
     url_parts = url.split("//", maxsplit=1)
     # If there is no "//" in the URL, then it is a relative URL
     if len(url_parts) == 1:
-        return quote_plus(url_parts[0], '/?&=#')
+        return quote(url_parts[0], '/?&=#')
 
     protocol, rest = url_parts
     domain_parts = rest.split("/", maxsplit=1)
@@ -32,7 +39,7 @@ def quote_url(url: str) -> str:
         return f"{protocol}//{domain_parts[0]}"
 
     domain, path = domain_parts
-    return f"{protocol}//{domain}/{quote_plus(path, '/?&=#')}"
+    return f"{protocol}//{domain}/{quote(path, '/?&=#')}"
 
 def quote_title(title: str) -> str:
     """
@@ -59,7 +66,7 @@ def format_link(url: str, title: Optional[str] = None) -> str:
     """
     if title is None:
         try:
-            title = unquote_plus(url.split("//", maxsplit=1)[1].split("?")[0].replace("www.", ""))
+            title = unquote(url.split("//", maxsplit=1)[1].split("?")[0].replace("www.", ""))
         except IndexError:
             title = url
     return f"[{quote_title(title)}]({quote_url(url)})"
@@ -77,6 +84,8 @@ def format_image(image: str, alt: str, preview: Optional[str] = None) -> str:
         str: The formatted markdown string.
     """
     preview_url = preview.replace('{image}', image) if preview else image
+    # if preview_url.startswith("/media/"):
+    #    preview_url = "/thumbnail" + preview_url[6:]
     return f"[![{quote_title(alt)}]({quote_url(preview_url)})]({quote_url(image)})"
 
 def format_images_markdown(images: Union[str, List[str]], alt: str, 
@@ -107,10 +116,7 @@ def format_images_markdown(images: Union[str, List[str]], alt: str,
             )
             for idx, image in enumerate(images)
         )
-
-    start_flag = "<!-- generated images start -->\n"
-    end_flag = "<!-- generated images end -->\n"
-    return f"\n{start_flag}{result}\n{end_flag}\n"
+    return result
 
 class ResponseType:
     @abstractmethod
@@ -159,7 +165,19 @@ class ToolCalls(HiddenResponse):
         return self.list
 
 class Usage(JsonMixin, HiddenResponse):
-    pass
+    def __init__(
+        self,
+        promptTokens: int = None,
+        completionTokens: int = None,
+        **kwargs
+    ):
+        if promptTokens is not None:
+            kwargs["prompt_tokens"] = promptTokens
+        if completionTokens is not None:
+            kwargs["completion_tokens"] = completionTokens
+        if "total_tokens" not in kwargs and "prompt_tokens" in kwargs and "completion_tokens" in kwargs:
+            kwargs["total_tokens"] = kwargs["prompt_tokens"] + kwargs["completion_tokens"]
+        return super().__init__(**kwargs)
 
 class AuthResult(JsonMixin, HiddenResponse):
     pass
@@ -170,6 +188,11 @@ class TitleGeneration(HiddenResponse):
         self.title = title
 
 class DebugResponse(HiddenResponse):
+    def __init__(self, log: str) -> None:
+        """Initialize with a log message."""
+        self.log = log
+
+class ContinueResponse(HiddenResponse):
     def __init__(self, log: str) -> None:
         """Initialize with a log message."""
         self.log = log
@@ -199,11 +222,6 @@ class Reasoning(ResponseType):
                 return f"{self.label}: {self.status}\n"
             return f"{self.status}\n"
         return ""
-
-    def __eq__(self, other: Reasoning):
-        return (self.token == other.token and
-                self.status == other.status and
-                self.is_thinking == other.is_thinking)
 
     def get_dict(self) -> Dict:
         """Return a dictionary representation of the reasoning."""
@@ -240,6 +258,15 @@ class Sources(ResponseType):
             for idx, link in enumerate(self.list)
         ]))
 
+class SourceLink(ResponseType):
+    def __init__(self, title: str, url: str) -> None:
+        self.title = title
+        self.url = url
+
+    def __str__(self) -> str:
+        title = f"[{self.title}]"
+        return f" {format_link(self.url, title)}"
+
 class YouTube(HiddenResponse):
     def __init__(self, ids: List[str]) -> None:
         """Initialize with a list of YouTube IDs."""
@@ -255,9 +282,10 @@ class YouTube(HiddenResponse):
         ]))
 
 class AudioResponse(ResponseType):
-    def __init__(self, data: Union[bytes, str]) -> None:
+    def __init__(self, data: Union[bytes, str], **kwargs) -> None:
         """Initialize with audio data bytes."""
         self.data = data
+        self.options = kwargs
 
     def to_uri(self) -> str:
         if isinstance(self.data, str):
@@ -311,9 +339,9 @@ class MediaResponse(ResponseType):
         self.alt = alt
         self.options = options
 
-    def get(self, key: str) -> any:
+    def get(self, key: str, default: any = None) -> any:
         """Get an option value by key."""
-        return self.options.get(key)
+        return self.options.get(key, default)
 
     def get_list(self) -> List[str]:
         """Return images as a list."""
@@ -327,7 +355,15 @@ class ImageResponse(MediaResponse):
 class VideoResponse(MediaResponse):
     def __str__(self) -> str:
         """Return videos as html elements."""
-        return "\n".join([f'<video controls src="{video}"></video>' for video in self.get_list()])
+        if self.get("preview"):
+            result = []
+            for idx, video in enumerate(self.get_list()):
+                image = self.get("preview")
+                if isinstance(image, list) and len(image) > idx:
+                    image = image[idx]
+                result.append(f'<video controls src="{quote_url(video)}" poster="{quote_url(image)}"></video>')
+            return "\n".join(result)
+        return "\n".join([f'<video controls src="{quote_url(video)}"></video>' for video in self.get_list()])
 
 class ImagePreview(ImageResponse):
     def __str__(self) -> str:

@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import time
 import random
+import json
 from urllib.parse import urlparse
-from typing import Iterator
+from typing import Iterator, AsyncIterator
 from http.cookies import Morsel
 from pathlib import Path
 import asyncio
@@ -43,6 +44,10 @@ from ..errors import MissingRequirementsError
 from ..typing import Cookies
 from ..cookies import get_cookies_dir
 from .defaults import DEFAULT_HEADERS, WEBVIEW_HAEDERS
+
+class BrowserConfig:
+    stop_browser = lambda: None
+    browser_executable_path: str = None
 
 if not has_curl_cffi:
     class Session:
@@ -95,16 +100,16 @@ async def get_args_from_nodriver(
         def stop_browser():
             ...
     try:
-        if debug.logging:
-            print(f"Open nodriver with url: {url}")
+        debug.log(f"Open nodriver with url: {url}")
         domain = urlparse(url).netloc
         if cookies is None:
             cookies = {}
         else:
             await browser.cookies.set_all(get_cookie_params_from_dict(cookies, url=url, domain=domain))
         page = await browser.get(url)
-        user_agent = str(await page.evaluate("window.navigator.userAgent"))
-        await page.wait_for("body:not(.no-js)", timeout=timeout)
+        user_agent = await page.evaluate("window.navigator.userAgent", return_by_value=True)
+        while not await page.evaluate("document.querySelector('body:not(.no-js)')"):
+            await asyncio.sleep(1)
         if wait_for is not None:
             await page.wait_for(wait_for, timeout=timeout)
         if callback is not None:
@@ -136,16 +141,21 @@ def merge_cookies(cookies: Iterator[Morsel], response: Response) -> Cookies:
             cookies[key] = value
     return cookies
 
+def set_browser_executable_path(browser_executable_path: str):
+    BrowserConfig.browser_executable_path = browser_executable_path
+
 async def get_nodriver(
     proxy: str = None,
     user_data_dir = "nodriver",
-    timeout: int = 120,
-    browser_executable_path=None,
+    timeout: int = 300,
+    browser_executable_path: str = None,
     **kwargs
 ) -> tuple[Browser, callable]:
     if not has_nodriver:
         raise MissingRequirementsError('Install "nodriver" and "platformdirs" package | pip install -U nodriver platformdirs')
     user_data_dir = user_config_dir(f"g4f-{user_data_dir}") if has_platformdirs else None
+    if browser_executable_path is None:
+        browser_executable_path = BrowserConfig.browser_executable_path
     if browser_executable_path is None:
         try:
             browser_executable_path = find_chrome_executable()
@@ -163,11 +173,19 @@ async def get_nodriver(
         time_open = time.time() - opend_at
         if timeout * 2 > time_open:
             debug.log(f"Nodriver: Browser is already in use since {time_open} secs.")
-            for _ in range(timeout):
+            debug.log("Lock file:", lock_file)
+            for idx in range(timeout):
                 if lock_file.exists():
                     await asyncio.sleep(1)
                 else:
                     break
+                if idx == timeout - 1:
+                    debug.log("Timeout reached, nodriver is still in use.")
+                    raise TimeoutError("Nodriver is already in use, please try again later.")
+        else:
+            debug.log(f"Nodriver: Browser was opened {time_open} secs ago, closing it.")
+            BrowserConfig.stop_browser()
+            lock_file.unlink(missing_ok=True)
     lock_file.write_text(str(time.time()))
     debug.log(f"Open nodriver with user_dir: {user_data_dir}")
     try:
@@ -177,6 +195,8 @@ async def get_nodriver(
             browser_executable_path=browser_executable_path,
             **kwargs
         )
+    except FileNotFoundError as e:
+        raise MissingRequirementsError(e)
     except:
         if util.get_registered_instances():
             browser = util.get_registered_instances().pop()
@@ -188,4 +208,37 @@ async def get_nodriver(
                 browser.stop()
         finally:
             lock_file.unlink(missing_ok=True)
+    BrowserConfig.stop_browser = on_stop
     return browser, on_stop
+
+async def see_stream(iter_lines: Iterator[bytes]) -> AsyncIterator[dict]:
+    async for line in iter_lines:
+        if line.startswith(b"data: "):
+            if line[6:].startswith(b"[DONE]"):
+                break
+            yield json.loads(line[6:])
+
+async def iter_lines(iter_response: AsyncIterator[bytes], delimiter=None):
+    """
+    iterate streaming content line by line, separated by ``\\n``.
+
+    Copied from: https://requests.readthedocs.io/en/latest/_modules/requests/models/
+    which is under the License: Apache 2.0
+    """
+    pending = None
+
+    async for chunk in iter_response:
+        if pending is not None:
+            chunk = pending + chunk
+        lines = chunk.split(delimiter) if delimiter else chunk.splitlines()
+        pending = (
+            lines.pop()
+            if lines and lines[-1] and chunk and lines[-1][-1] == chunk[-1]
+            else None
+        )
+
+        for line in lines:
+            yield line
+
+    if pending is not None:
+        yield pending

@@ -1,38 +1,26 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Union, Optional
-try:
-    from typing import Annotated
-except ImportError:
-    class Annotated:
-        pass
-from g4f.typing import Messages
 
-class ChatCompletionsConfig(BaseModel):
-    messages: Messages = Field(examples=[[{"role": "system", "content": ""}, {"role": "user", "content": ""}]])
+from ..typing import Messages
+
+class RequestConfig(BaseModel):
     model: str = Field(default="")
     provider: Optional[str] = None
-    stream: bool = False
-    image: Optional[str] = None
-    image_name: Optional[str] = None
-    images: Optional[list[tuple[str, str]]] = None
     media: Optional[list[tuple[str, str]]] = None
-    modalities: Optional[list[str]] = ["text", "audio"]
+    modalities: Optional[list[str]] = None
     temperature: Optional[float] = None
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     stop: Union[list[str], str, None] = None
-    api_key: Optional[str] = None
+    api_key: Optional[Union[str, dict[str, str]]] = None
     api_base: str = None
     web_search: Optional[bool] = None
     proxy: Optional[str] = None
-    conversation_id: Optional[str] = None
     conversation: Optional[dict] = None
-    return_conversation: Optional[bool] = None
-    history_disabled: Optional[bool] = None
     timeout: Optional[int] = None
     tool_calls: list = Field(default=[], examples=[[
 		{
@@ -43,15 +31,27 @@ class ChatCompletionsConfig(BaseModel):
 			"type": "function"
 		}
 	]])
-    tools: list = None
-    parallel_tool_calls: bool = None
-    tool_choice: Optional[str] = None
     reasoning_effort: Optional[str] = None
     logit_bias: Optional[dict] = None
     modalities: Optional[list[str]] = None
     audio: Optional[dict] = None
     response_format: Optional[dict] = None
-    extra_data: Optional[dict] = None
+    download_media: bool = True
+    extra_body: Optional[dict] = None
+
+class ChatCompletionsConfig(RequestConfig):
+    messages: Messages = Field(examples=[[{"role": "system", "content": ""}, {"role": "user", "content": ""}]])
+    stream: bool = False
+    image: Optional[str] = None
+    image_name: Optional[str] = None
+    images: Optional[list[tuple[str, str]]] = None
+    tools: list = None
+    parallel_tool_calls: bool = None
+    tool_choice: Optional[str] = None
+    conversation_id: Optional[str] = None
+
+class ResponsesConfig(RequestConfig):
+    input: Union[Messages, str]
 
 class ImageGenerationConfig(BaseModel):
     prompt: str
@@ -69,6 +69,23 @@ class ImageGenerationConfig(BaseModel):
     n: Optional[int] = None
     negative_prompt: Optional[str] = None
     resolution: Optional[str] = None
+    audio: Optional[dict] = None
+    download_media: bool = True
+
+
+    @model_validator(mode='before')
+    def parse_size(cls, values):
+        if values.get('width') is not None and values.get('height') is not None:
+            return values
+
+        size = values.get('size')
+        if size:
+            try:
+                width, height = map(int, size.split('x'))
+                values['width'] = width
+                values['height'] = height
+            except (ValueError, AttributeError): pass  # If the format is incorrect, we simply ignore it.
+        return values
 
 class ProviderResponseModel(BaseModel):
     id: str
@@ -103,3 +120,17 @@ class ErrorResponseMessageModel(BaseModel):
 
 class FileResponseModel(BaseModel):
     filename: str
+
+class TranscriptionResponseModel(BaseModel):
+    text: str
+    model: str
+    provider: str
+
+class AudioSpeechConfig(BaseModel):
+    input: str
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    voice: Optional[str] = None
+    instrcutions: str = "Speech this text in a natural way."
+    response_format: Optional[str] = None
+    language: Optional[str] = None

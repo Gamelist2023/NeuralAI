@@ -5,15 +5,16 @@ import json
 import uvicorn
 import secrets
 import os
+import re
 import shutil
 from email.utils import formatdate
 import os.path
 import hashlib
 import asyncio
+from contextlib import asynccontextmanager
 from urllib.parse import quote_plus
-from fastapi import FastAPI, Response, Request, UploadFile, Depends
-from fastapi.middleware.wsgi import WSGIMiddleware
-from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, Response, Request, UploadFile, Form, Depends
+from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse, JSONResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import APIKeyHeader
 from starlette.exceptions import HTTPException
@@ -30,36 +31,79 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import FileResponse
+from starlette.background import BackgroundTask
+try:
+    from a2wsgi import WSGIMiddleware
+    has_a2wsgi = True
+except ImportError:
+    has_a2wsgi = False
+try:
+    from PIL import Image 
+    has_pillow = True
+except ImportError:
+    has_pillow = False
 from types import SimpleNamespace
 from typing import Union, Optional, List
 
+try:
+    from typing import Annotated
+except ImportError:
+    class Annotated:
+        pass
+try:
+    from nodriver import util
+    has_nodriver = True
+except ImportError:
+    has_nodriver = False
+
 import g4f
-import g4f.Provider
 import g4f.debug
-from g4f.client import AsyncClient, ChatCompletion, ImagesResponse, convert_to_provider
+from g4f.client import AsyncClient, ChatCompletion, ImagesResponse, ClientResponse
 from g4f.providers.response import BaseConversation, JsonConversation
 from g4f.client.helper import filter_none
-from g4f.image import is_data_an_media, EXTENSIONS_MAP
-from g4f.image.copy_images import images_dir, copy_media, get_source_url
-from g4f.errors import ProviderNotFoundError, ModelNotFoundError, MissingAuthError, NoValidHarFileError
+from g4f.image import EXTENSIONS_MAP, is_data_an_media, process_image
+from g4f.image.copy_images import get_media_dir, copy_media, get_source_url
+from g4f.errors import ProviderNotFoundError, ModelNotFoundError, MissingAuthError, NoValidHarFileError, MissingRequirementsError
 from g4f.cookies import read_cookie_files, get_cookies_dir
-from g4f.Provider import ProviderType, ProviderUtils, __providers__
+from g4f.providers.types import ProviderType
+from g4f.providers.response import AudioResponse
+from g4f.providers.any_provider import AnyProvider
+from g4f import Provider
 from g4f.gui import get_gui_app
-from g4f.tools.files import supports_filename, get_async_streaming
 from .stubs import (
     ChatCompletionsConfig, ImageGenerationConfig,
     ProviderResponseModel, ModelResponseModel,
     ErrorResponseModel, ProviderResponseDetailModel,
-    FileResponseModel, UploadResponseModel, Annotated
+    FileResponseModel,
+    TranscriptionResponseModel, AudioSpeechConfig,
+    ResponsesConfig
 )
 from g4f import debug
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 1337
+DEFAULT_TIMEOUT = 600
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Read cookie files if not ignored
+    if not AppConfig.ignore_cookie_files:
+        read_cookie_files()
+    yield
+    if has_nodriver:
+        for browser in util.get_registered_instances():
+            if browser.connection:
+                browser.stop()
+        lock_file = os.path.join(get_cookies_dir(), ".nodriver_is_open")
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+            except Exception as e:
+                debug.error(f"Failed to remove lock file {lock_file}:" ,e)
 
 def create_app():
-    app = FastAPI()
+    app = FastAPI(lifespan=lifespan)
 
     # Add CORS middleware
     app.add_middleware(
@@ -77,17 +121,15 @@ def create_app():
     api.register_validation_exception_handler()
 
     if AppConfig.gui:
-        gui_app = WSGIMiddleware(get_gui_app(AppConfig.demo))
+        if not has_a2wsgi:
+            raise MissingRequirementsError("a2wsgi is required for GUI. Install it with: pip install a2wsgi")
+        gui_app = WSGIMiddleware(get_gui_app(AppConfig.demo, AppConfig.timeout))
         app.mount("/", gui_app)
-
-    # Read cookie files if not ignored
-    if not AppConfig.ignore_cookie_files:
-        read_cookie_files()
 
     if AppConfig.ignored_providers:
         for provider in AppConfig.ignored_providers:
-            if provider in ProviderUtils.convert:
-                ProviderUtils.convert[provider].working = False
+            if provider in Provider.__map__:
+                Provider.__map__[provider].working = False
 
     return app
 
@@ -128,10 +170,11 @@ class AppConfig:
     ignore_cookie_files: bool = False
     model: str = None
     provider: str = None
-    image_provider: str = None
+    media_provider: str = None
     proxy: str = None
     gui: bool = False
     demo: bool = False
+    timeout: int = DEFAULT_TIMEOUT
 
     @classmethod
     def set_config(cls, **data):
@@ -232,13 +275,13 @@ class Api:
             return {
                 "object": "list",
                 "data": [{
-                    "id": model_id,
+                    "id": model,
                     "object": "model",
                     "created": 0,
-                    "owned_by": model.base_provider,
+                    "owned_by": "",
                     "image": isinstance(model, g4f.models.ImageModel),
                     "provider": False,
-                } for model_id, model in g4f.models.ModelUtils.convert.items()] +
+                } for model in AnyProvider.get_models()] +
                 [{
                     "id": provider_name,
                     "object": "model",
@@ -246,8 +289,8 @@ class Api:
                     "owned_by": getattr(provider, "label", None),
                     "image": bool(getattr(provider, "image_models", False)),
                     "provider": True,
-                } for provider_name, provider in g4f.Provider.ProviderUtils.convert.items()
-                    if provider.working and provider_name != "Custom"
+                } for provider_name, provider in Provider.ProviderUtils.convert.items()
+                    if provider.working and provider_name not in ("Custom", "Puter")
                 ]
             }
 
@@ -255,9 +298,9 @@ class Api:
             HTTP_200_OK: {"model": List[ModelResponseModel]},
         })
         async def models(provider: str, credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None):
-            if provider not in ProviderUtils.convert:
+            if provider not in Provider.__map__:
                 return ErrorResponse.from_message("The provider does not exist.", 404)
-            provider: ProviderType = ProviderUtils.convert[provider]
+            provider: ProviderType = Provider.__map__[provider]
             if not hasattr(provider, "get_models"):
                 models = []
             elif credentials is not None and credentials.credentials != "secret":
@@ -291,31 +334,34 @@ class Api:
                 })
             return ErrorResponse.from_message("The model does not exist.", HTTP_404_NOT_FOUND)
 
-        @self.app.post("/v1/chat/completions", responses={
+        responses = {
             HTTP_200_OK: {"model": ChatCompletion},
             HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
             HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
             HTTP_422_UNPROCESSABLE_ENTITY: {"model": ErrorResponseModel},
             HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
-        })
+        }
+        @self.app.post("/v1/chat/completions", responses=responses)
         async def chat_completions(
             config: ChatCompletionsConfig,
             credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None,
-            provider: str = None
+            provider: str = None,
+            conversation_id: str = None,
         ):
             try:
                 if config.provider is None:
                     config.provider = AppConfig.provider if provider is None else provider
+                if config.conversation_id is None:
+                    config.conversation_id = conversation_id
+                if config.timeout is None:
+                    config.timeout = AppConfig.timeout
                 if credentials is not None and credentials.credentials != "secret":
                     config.api_key = credentials.credentials
 
-                conversation = None
-                return_conversation = config.return_conversation
-                if conversation is not None:
+                conversation = config.conversation
+                if conversation:
                     conversation = JsonConversation(**conversation)
-                    return_conversation = True
                 elif config.conversation_id is not None and config.provider is not None:
-                    return_conversation = True
                     if config.conversation_id in self.conversations:
                         if config.provider in self.conversations[config.conversation_id]:
                             conversation = self.conversations[config.conversation_id][config.provider]
@@ -345,7 +391,6 @@ class Api:
                             **config.dict(exclude_none=True),
                             **{
                                 "conversation_id": None,
-                                "return_conversation": return_conversation,
                                 "conversation": conversation
                             }
                         },
@@ -385,19 +430,74 @@ class Api:
                 logger.exception(e)
                 return ErrorResponse.from_exception(e, config, HTTP_500_INTERNAL_SERVER_ERROR)
 
-        @self.app.post("/api/{provider}/chat/completions", responses={
-            HTTP_200_OK: {"model": ChatCompletion},
-            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
-            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
-            HTTP_422_UNPROCESSABLE_ENTITY: {"model": ErrorResponseModel},
-            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
-        })
+        @self.app.post("/api/{provider}/chat/completions", responses=responses)
         async def provider_chat_completions(
             provider: str,
             config: ChatCompletionsConfig,
             credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None,
         ):
             return await chat_completions(config, credentials, provider)
+
+        responses = {
+            HTTP_200_OK: {"model": ClientResponse},
+            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            HTTP_422_UNPROCESSABLE_ENTITY: {"model": ErrorResponseModel},
+            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
+        }
+        @self.app.post("/v1/responses", responses=responses)
+        async def v1_responses(
+            config: ResponsesConfig,
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None,
+            provider: str = None
+        ):
+            try:
+                if config.provider is None:
+                    config.provider = AppConfig.provider if provider is None else provider
+                if config.api_key is None and credentials is not None and credentials.credentials != "secret":
+                    config.api_key = credentials.credentials
+
+                conversation = None
+                if config.conversation is not None:
+                    conversation = JsonConversation(**config.conversation)
+
+                return await self.client.responses.create(
+                    **filter_none(
+                        **{
+                            "model": AppConfig.model,
+                            "proxy": AppConfig.proxy,
+                            **config.dict(exclude_none=True),
+                            "conversation": conversation
+                        },
+                        ignored=AppConfig.ignored_providers
+                    ),
+                )
+            except (ModelNotFoundError, ProviderNotFoundError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_404_NOT_FOUND)
+            except (MissingAuthError, NoValidHarFileError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_401_UNAUTHORIZED)
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_500_INTERNAL_SERVER_ERROR)
+
+        @self.app.post("/api/{provider}/responses", responses=responses)
+        async def provider_responses(
+            provider: str,
+            config: ChatCompletionsConfig,
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None,
+        ):
+            return await v1_responses(config, credentials, provider)
+
+        @self.app.post("/api/{provider}/{conversation_id}/chat/completions", responses=responses)
+        async def provider_chat_completions(
+            provider: str,
+            conversation_id: str,
+            config: ChatCompletionsConfig,
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None,
+        ):
+            return await chat_completions(config, credentials, provider, conversation_id)
 
         responses = {
             HTTP_200_OK: {"model": ImagesResponse},
@@ -417,12 +517,13 @@ class Api:
         ):
             if config.provider is None:
                 config.provider = provider
-            if credentials is not None and credentials.credentials != "secret":
+            if config.provider is None:
+                config.provider = AppConfig.media_provider
+            if config.api_key is None and credentials is not None and credentials.credentials != "secret":
                 config.api_key = credentials.credentials
             try:
                 response = await self.client.images.generate(
                     **config.dict(exclude_none=True),
-                    provider=AppConfig.image_provider if config.provider is None else config.provider
                 )
                 for image in response.data:
                     if hasattr(image, "url") and image.url.startswith("/"):
@@ -448,16 +549,16 @@ class Api:
                 'created': 0,
                 'url': provider.url,
                 'label': getattr(provider, "label", None),
-            } for provider in __providers__ if provider.working]
+            } for provider in Provider.__providers__ if provider.working]
 
         @self.app.get("/v1/providers/{provider}", responses={
             HTTP_200_OK: {"model": ProviderResponseDetailModel},
             HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
         })
         async def providers_info(provider: str):
-            if provider not in ProviderUtils.convert:
+            if provider not in Provider.ProviderUtils.convert:
                 return ErrorResponse.from_message("The provider does not exist.", 404)
-            provider: ProviderType = ProviderUtils.convert[provider]
+            provider: ProviderType = Provider.ProviderUtils.convert[provider]
             def safe_get_models(provider: ProviderType) -> list[str]:
                 try:
                     return provider.get_models() if hasattr(provider, "get_models") else []
@@ -475,10 +576,105 @@ class Api:
                 'params': [*provider.get_parameters()] if hasattr(provider, "get_parameters") else []
             }
 
+        responses = {
+            HTTP_200_OK: {"model": TranscriptionResponseModel},
+            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
+        }
+        @self.app.post("/v1/audio/transcriptions", responses=responses)
+        @self.app.post("/api/{path_provider}/audio/transcriptions", responses=responses)
+        async def convert(
+            file: UploadFile,
+            path_provider: str = None,
+            model: Annotated[Optional[str], Form()] = None,
+            provider: Annotated[Optional[str], Form()] = None,
+            prompt: Annotated[Optional[str], Form()] = "Transcribe this audio"
+        ):
+            provider = provider if path_provider is None else path_provider
+            kwargs = {"modalities": ["text"]}
+            if provider == "MarkItDown":
+                kwargs = {
+                    "llm_client": self.client,
+                }
+            try:
+                response = await self.client.chat.completions.create(
+                    messages=prompt,
+                    model=model,
+                    provider=provider,
+                    media=[[file.file, file.filename]],
+                    **kwargs
+                )
+                return {"text": response.choices[0].message.content, "model": response.model, "provider": response.provider}
+            except (ModelNotFoundError, ProviderNotFoundError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_404_NOT_FOUND)
+            except MissingAuthError as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_401_UNAUTHORIZED)
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_500_INTERNAL_SERVER_ERROR)
+
+        @self.app.post("/api/markitdown", responses=responses)
+        async def markitdown(
+            file: UploadFile
+        ):
+            return await convert(file, "MarkItDown")
+
+        responses = {
+            HTTP_200_OK: {"content": {"audio/*": {}}},
+            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
+        }
+        @self.app.post("/v1/audio/speech", responses=responses)
+        @self.app.post("/api/{path_provider}/audio/speech", responses=responses)
+        async def generate_speech(
+            config: AudioSpeechConfig,
+            provider: str = AppConfig.media_provider,
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None
+        ):
+            api_key = None
+            if credentials is not None and credentials.credentials != "secret":
+                api_key = credentials.credentials
+            try:
+                response = await self.client.chat.completions.create(
+                    messages=[
+                        {"role": "user", "content": f"{config.instrcutions} Text: {config.input}"}
+                    ],
+                    model=config.model,
+                    provider=config.provider if provider is None else provider,
+                    prompt=config.input,
+                    audio=filter_none(voice=config.voice, format=config.response_format, language=config.language),
+                    api_key=api_key,
+                )
+                if isinstance(response.choices[0].message.content, AudioResponse):
+                    response = response.choices[0].message.content.data
+                    response = response.replace("/media", get_media_dir())
+                    def delete_file():
+                        try:
+                            os.remove(response)
+                        except Exception as e:
+                            logger.exception(e)
+                    return FileResponse(response, background=BackgroundTask(delete_file))
+            except (ModelNotFoundError, ProviderNotFoundError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_404_NOT_FOUND)
+            except MissingAuthError as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_401_UNAUTHORIZED)
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_500_INTERNAL_SERVER_ERROR)
+
         @self.app.post("/v1/upload_cookies", responses={
             HTTP_200_OK: {"model": List[FileResponseModel]},
         })
-        def upload_cookies(files: List[UploadFile]):
+        def upload_cookies(
+            files: List[UploadFile],
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None
+        ):
             response_data = []
             if not AppConfig.ignore_cookie_files:
                 for file in files:
@@ -493,59 +689,6 @@ class Api:
                 read_cookie_files()
             return response_data
 
-        @self.app.get("/v1/files/{bucket_id}", responses={
-            HTTP_200_OK: {"content": {
-                "text/event-stream": {"schema": {"type": "string"}},
-                "text/plain": {"schema": {"type": "string"}},
-            }},
-            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
-        })
-        def read_files(request: Request, bucket_id: str, delete_files: bool = True, refine_chunks_with_spacy: bool = False):
-            bucket_dir = os.path.join(get_cookies_dir(), "buckets", bucket_id)
-            event_stream = "text/event-stream" in request.headers.get("accept", "")
-            if not os.path.isdir(bucket_dir):
-                return ErrorResponse.from_message("Bucket dir not found", 404)
-            return StreamingResponse(get_async_streaming(bucket_dir, delete_files, refine_chunks_with_spacy, event_stream),
-                                     media_type="text/event-stream" if event_stream else "text/plain")
-
-        @self.app.post("/v1/files/{bucket_id}", responses={
-            HTTP_200_OK: {"model": UploadResponseModel}
-        })
-        def upload_files(bucket_id: str, files: List[UploadFile]):
-            bucket_dir = os.path.join(get_cookies_dir(), "buckets", bucket_id)
-            os.makedirs(bucket_dir, exist_ok=True)
-            filenames = []
-            for file in files:
-                try:
-                    filename = os.path.basename(file.filename)
-                    if file and supports_filename(filename):
-                        with open(os.path.join(bucket_dir, filename), 'wb') as f:
-                            shutil.copyfileobj(file.file, f)
-                        filenames.append(filename)
-                finally:
-                    file.file.close()
-            with open(os.path.join(bucket_dir, "files.txt"), 'w') as f:
-                [f.write(f"{filename}\n") for filename in filenames]
-            return {"bucket_id": bucket_id, "url": f"/v1/files/{bucket_id}", "files": filenames}
-
-        @self.app.get("/v1/synthesize/{provider}", responses={
-            HTTP_200_OK: {"content": {"audio/*": {}}},
-            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
-            HTTP_422_UNPROCESSABLE_ENTITY: {"model": ErrorResponseModel},
-        })
-        async def synthesize(request: Request, provider: str):
-            try:
-                provider_handler = convert_to_provider(provider)
-            except ProviderNotFoundError as e:
-                return ErrorResponse.from_exception(e, status_code=HTTP_404_NOT_FOUND)
-            if not hasattr(provider_handler, "synthesize"):
-                return ErrorResponse.from_message("Provider doesn't support synthesize", HTTP_404_NOT_FOUND)
-            if len(request.query_params) == 0:
-                return ErrorResponse.from_message("Missing query params", HTTP_422_UNPROCESSABLE_ENTITY)
-            response_data = provider_handler.synthesize({**request.query_params})
-            content_type = getattr(provider_handler, "synthesize_content_type", "application/octet-stream")
-            return StreamingResponse(response_data, media_type=content_type)
-
         @self.app.post("/json/{filename}")
         async def get_json(filename, request: Request):
             await asyncio.sleep(30)
@@ -559,19 +702,30 @@ class Api:
             HTTP_200_OK: {"content": {"image/*": {}, "audio/*": {}}, "video/*": {}},
             HTTP_404_NOT_FOUND: {}
         })
-        async def get_media(filename, request: Request):
-            target = os.path.join(images_dir, os.path.basename(filename))
+        async def get_media(filename, request: Request, thumbnail: bool = False):
+            def get_timestamp(str):
+                m=re.match("^[0-9]+", str)
+                if m:
+                    return int(m.group(0))
+                else:
+                    raise ValueError("No timestamp found in filename")
+            target = os.path.join(get_media_dir(), os.path.basename(filename))
+            if thumbnail and has_pillow:
+                thumbnail_dir = os.path.join(get_media_dir(), "thumbnails")
+                thumbnail = os.path.join(thumbnail_dir, filename)
             if not os.path.isfile(target):
-                other_name = os.path.join(images_dir, os.path.basename(quote_plus(filename)))
+                other_name = os.path.join(get_media_dir(), os.path.basename(quote_plus(filename)))
                 if os.path.isfile(other_name):
                     target = other_name
             ext = os.path.splitext(filename)[1][1:]
             mime_type = EXTENSIONS_MAP.get(ext)
             stat_result = SimpleNamespace()
             stat_result.st_size = 0
-            if os.path.isfile(target):
+            stat_result.st_mtime = get_timestamp(filename)
+            if thumbnail and has_pillow and os.path.isfile(thumbnail):
+                stat_result.st_size = os.stat(thumbnail).st_size
+            elif not thumbnail and os.path.isfile(target):
                 stat_result.st_size = os.stat(target).st_size
-            stat_result.st_mtime = int(f"{filename.split('_')[0]}") if filename.startswith("1") else 0
             headers = {
                 "cache-control": "public, max-age=31536000",
                 "last-modified": formatdate(stat_result.st_mtime, usegmt=True),
@@ -579,7 +733,7 @@ class Api:
                 **({
                     "content-length": str(stat_result.st_size),
                 } if stat_result.st_size else {}),
-                **({} if mime_type is None else {
+                **({} if thumbnail or mime_type is None else {
                     "content-type": mime_type,
                 })
             }
@@ -610,12 +764,26 @@ class Api:
                             target=target, ssl=ssl)
                         debug.log(f"File copied from {source_url}")
                     except Exception as e:
-                        debug.error(f"Download failed:  {source_url}\n{type(e).__name__}: {e}")
+                        debug.error(f"Download failed:  {source_url}")
+                        debug.error(e)
                         return RedirectResponse(url=source_url)
-            if not os.path.isfile(target):
+            if thumbnail and has_pillow:
+                try:
+                    if not os.path.isfile(thumbnail):
+                        image = Image.open(target)
+                        os.makedirs(thumbnail_dir, exist_ok=True)
+                        process_image(image, save=thumbnail)
+                        debug.log(f"Thumbnail created: {thumbnail}")
+                except Exception as e:
+                    logger.exception(e)
+            if thumbnail and os.path.isfile(thumbnail):
+                result = thumbnail
+            else:
+                result = target
+            if not os.path.isfile(result):
                 return ErrorResponse.from_message("File not found", HTTP_404_NOT_FOUND)
             async def stream():
-                with open(target, "rb") as file:
+                with open(result, "rb") as file:
                     while True:
                         chunk = file.read(65536)
                         if not chunk:
@@ -623,9 +791,16 @@ class Api:
                         yield chunk
             return StreamingResponse(stream(), headers=headers)
 
+        @self.app.get("/thumbnail/{filename}", responses={
+            HTTP_200_OK: {"content": {"image/*": {}, "audio/*": {}}, "video/*": {}},
+            HTTP_404_NOT_FOUND: {}
+        })
+        async def get_media_thumbnail(filename: str, request: Request):
+            return await get_media(filename, request, True)
+
 def format_exception(e: Union[Exception, str], config: Union[ChatCompletionsConfig, ImageGenerationConfig] = None, image: bool = False) -> str:
     last_provider = {} if not image else g4f.get_last_provider(True)
-    provider = (AppConfig.image_provider if image else AppConfig.provider)
+    provider = (AppConfig.media_provider if image else AppConfig.provider)
     model = AppConfig.model
     if config is not None:
         if config.provider is not None:

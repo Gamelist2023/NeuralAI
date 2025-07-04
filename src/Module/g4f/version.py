@@ -6,10 +6,8 @@ from functools import cached_property
 from importlib.metadata import version as get_package_version, PackageNotFoundError
 from subprocess import check_output, CalledProcessError, PIPE
 from .errors import VersionNotFoundError
+from .constants import PACKAGE_NAME, GITHUB_REPOSITORY
 from . import debug
-
-PACKAGE_NAME = "g4f"
-GITHUB_REPOSITORY = "xtekky/gpt4free"
 
 def get_pypi_version(package_name: str) -> str:
     """
@@ -50,6 +48,14 @@ def get_github_version(repo: str) -> str:
     except requests.RequestException as e:
         raise VersionNotFoundError(f"Failed to get GitHub release version: {e}")
 
+def get_git_version() -> str:
+    # Read from git repository
+    try:
+        command = ["git", "describe", "--tags", "--abbrev=0"]
+        return check_output(command, text=True, stderr=PIPE).strip()
+    except CalledProcessError:
+        return None
+
 class VersionUtils:
     """
     Utility class for managing and comparing package versions of 'g4f'.
@@ -80,14 +86,7 @@ class VersionUtils:
         if version:
             return version
 
-        # Read from git repository
-        try:
-            command = ["git", "describe", "--tags", "--abbrev=0"]
-            return check_output(command, text=True, stderr=PIPE).strip()
-        except CalledProcessError:
-            pass
-
-        return None
+        return get_git_version()
 
     @property
     def latest_version(self) -> str:
@@ -103,6 +102,10 @@ class VersionUtils:
         except PackageNotFoundError:
             return get_github_version(GITHUB_REPOSITORY)
         return get_pypi_version(PACKAGE_NAME)
+
+    @cached_property
+    def latest_version_cached(self) -> str:
+        return self.latest_version
 
     def check_version(self) -> None:
         """

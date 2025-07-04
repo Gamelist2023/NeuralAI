@@ -80,7 +80,7 @@ class ToolHandler:
         has_bucket = False
         for message in messages:
             if "content" in message and isinstance(message["content"], str):
-                new_message_content = re.sub(r'{"bucket_id":"([^"]*)"}', on_bucket, message["content"])
+                new_message_content = re.sub(r'{"bucket_id":\s*"([^"]*)"}', on_bucket, message["content"])
                 if new_message_content != message["content"]:
                     has_bucket = True
                     message["content"] = new_message_content
@@ -97,50 +97,51 @@ class ToolHandler:
         """Process all tool calls and return updated messages and kwargs"""
         if not tool_calls:
             return messages, {}
-            
+
         extra_kwargs = {}
         messages = messages.copy()
         sources = None
-        
+
         for tool in tool_calls:
             if tool.get("type") != "function":
                 continue
-                
+
             function_name = tool.get("function", {}).get("name")
-            
+
             if function_name == TOOL_NAMES["SEARCH"]:
                 messages, sources = await ToolHandler.process_search_tool(messages, tool)
-                
+
             elif function_name == TOOL_NAMES["CONTINUE"]:
                 messages, kwargs = ToolHandler.process_continue_tool(messages, tool, provider)
                 extra_kwargs.update(kwargs)
-                
+
             elif function_name == TOOL_NAMES["BUCKET"]:
                 messages = ToolHandler.process_bucket_tool(messages, tool)
-                
-        return messages, sources, extra_kwargs
 
+        return messages, sources, extra_kwargs
 
 class AuthManager:
     """Handles API key management"""
     
     @staticmethod
-    def get_api_key_file(cls) -> Path:
+    def get_api_key_file(provider) -> Path:
         """Get the path to the API key file for a provider"""
-        return Path(get_cookies_dir()) / f"api_key_{cls.parent if hasattr(cls, 'parent') else cls.__name__}.json"
-    
+        return Path(get_cookies_dir()) / f"auth_{provider if isinstance(provider, str) else provider.get_parent()}.json"
+
     @staticmethod
     def load_api_key(provider: Any) -> Optional[str]:
-        """Load API key from config file if needed"""
-        if not getattr(provider, "needs_auth", False):
-            return None
-            
+        """Load API key from config file"""
         auth_file = AuthManager.get_api_key_file(provider)
         try:
             if auth_file.exists():
+                debug.log(f"Loading API key from {auth_file}")
                 with auth_file.open("r") as f:
-                    auth_result = json.load(f)
-                return auth_result.get("api_key")
+                    try:
+                        auth_result = json.load(f)
+                    except json.JSONDecodeError as e:
+                        return auth_file.read_text()
+                if isinstance(auth_result, dict):
+                    return auth_result.get("api_key")
         except (json.JSONDecodeError, PermissionError, FileNotFoundError) as e:
             debug.error(f"Failed to load API key: {e.__class__.__name__}: {e}")
         return None
@@ -171,7 +172,7 @@ class ThinkingProcessor:
                 if "</think>" in after[0]:
                     after, *after_end = after[0].split("</think>", 1)
                     results.append(Reasoning(after))
-                    results.append(Reasoning(status="Finished", is_thinking="</think>"))
+                    results.append(Reasoning(status="", is_thinking="</think>"))
                     if after_end:
                         results.append(after_end[0])
                     return 0, results
@@ -188,10 +189,10 @@ class ThinkingProcessor:
                 results.append(Reasoning(before_end))
                 
             thinking_duration = time.time() - start_time if start_time > 0 else 0
-            
-            status = f"Thought for {thinking_duration:.2f}s" if thinking_duration > 1 else "Finished"
+
+            status = f"Thought for {thinking_duration:.2f}s" if thinking_duration > 1 else ""
             results.append(Reasoning(status=status, is_thinking="</think>"))
-            
+
             # Make sure to handle text after the closing tag
             if after and after[0].strip():
                 results.append(after[0])
@@ -235,11 +236,12 @@ async def async_iter_run_tools(
     web_search = kwargs.get('web_search')
     if web_search:
         messages, sources = await perform_web_search(messages, web_search)
-    
-    # Get API key if needed
-    api_key = AuthManager.load_api_key(provider)
-    if api_key and "api_key" not in kwargs:
-        kwargs["api_key"] = api_key
+
+    # Get API key
+    if not kwargs.get("api_key"):
+        api_key = AuthManager.load_api_key(provider)
+        if api_key:
+            kwargs["api_key"] = api_key
     
     # Process tool calls
     if tool_calls:
@@ -247,8 +249,7 @@ async def async_iter_run_tools(
         kwargs.update(extra_kwargs)
     
     # Generate response
-    create_function = provider.get_async_create_function()
-    response = to_async_iterator(create_function(model=model, messages=messages, **kwargs))
+    response = to_async_iterator(provider.async_create_function(model=model, messages=messages, **kwargs))
     
     async for chunk in response:
         yield chunk
@@ -256,7 +257,6 @@ async def async_iter_run_tools(
     # Yield sources if available
     if sources:
         yield sources
-
 
 def iter_run_tools(
     iter_callback: Callable,
@@ -281,11 +281,11 @@ def iter_run_tools(
             debug.error(f"Couldn't do web search: {e.__class__.__name__}: {e}")
     
     # Get API key if needed
-    if provider is not None and getattr(provider, "needs_auth", False) and "api_key" not in kwargs:
+    if provider is not None and not kwargs.get("api_key"):
         api_key = AuthManager.load_api_key(provider)
         if api_key:
             kwargs["api_key"] = api_key
-    
+
     # Process tool calls
     if tool_calls:
         for tool in tool_calls:
