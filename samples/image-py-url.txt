@@ -1,0 +1,50 @@
+# Python: 画像生成 (URL取得)
+import requests
+import json
+from typing import Optional
+
+def generate_image_url(model: str, prompt: str, api_key: Optional[str] = None):
+    url = "http://127.0.0.1:9002/chat"
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "model": model,
+        "message": prompt, # Use message as prompt
+        "api_key": api_key,
+        "type": "image@url"
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        return response.json()['image_url']
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+        if e.response is not None:
+            try:
+                error_details = e.response.json()
+                print(f"Error response: {error_details}")
+                # Check for Retry-After header in case of 429
+                if e.response.status_code == 429:
+                    retry_after = e.response.headers.get('Retry-After')
+                    if retry_after:
+                        print(f"Rate limit hit. Retry after {retry_after} seconds.")
+            except json.JSONDecodeError:
+                print(f"Error response (text): {e.response.text}")
+        return None
+    except KeyError:
+        print(f"Error: 'image_url' key not found in the JSON response.")
+        try:
+            print(f"Received JSON: {response.json()}")
+        except json.JSONDecodeError:
+            print(f"Received non-JSON response: {response.text}")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return None
+
+# 使用例:
+try:
+    image_url = generate_image_url("flux", "A watercolor painting of a sunset over the ocean")
+    if image_url:
+        print("Generated Image URL:", image_url)
+except Exception as e:
+    print(f"An error occurred during image generation: {e}")

@@ -1,0 +1,101 @@
+// JavaScript: チャット (ストリーミング)
+async function chatWithAIStream(providerName, model, message, apiKey = null, onDelta, onEnd, onError) {
+  const apiUrl = "http://127.0.0.1:9002/chat";
+  const payload = {
+    provider_name: providerName,
+    model: model,
+    message: message,
+    api_key: apiKey,
+    stream: true,
+    type: "chat"
+  };
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream"
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      let errorDetail = `HTTP error! status: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorDetail = errorData.detail || JSON.stringify(errorData);
+      } catch (e) {
+        errorDetail = await response.text();
+      }
+      throw new Error(errorDetail);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        if (onEnd) onEnd();
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const dataStr = line.substring(6);
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.delta) {
+              if (onDelta) onDelta(data.delta);
+            } else if (data.end_of_stream) {
+              if (onEnd) onEnd();
+              return;
+            }
+          } catch (e) {
+            if (onError) onError({ error: "Failed to parse SSE data", raw: dataStr });
+          }
+        } else if (line.startsWith('event: error')) {
+          // Find the next data line for the error payload
+          const dataLineIndex = lines.indexOf(line) + 1;
+          if (dataLineIndex < lines.length && lines[dataLineIndex].startsWith('data: ')) {
+            const errorDataStr = lines[dataLineIndex].substring(6);
+            try {
+              const errorData = JSON.parse(errorDataStr);
+              if (onError) onError(errorData);
+            } catch (e) {
+              if (onError) onError({ error: "Failed to parse error data", raw: errorDataStr });
+            }
+          } else {
+            if (onError) onError({ error: "Received error event without data" });
+          }
+          return;
+        }
+      }
+    }
+  } catch (error) {
+    if (onError) onError({ error: error.message });
+  }
+}
+
+// 使用例:
+let fullResponse = "";
+chatWithAIStream(
+  "Gemini",
+  "gemini-1.5-flash",
+  "自己紹介をしてください。",
+  null, // apiKey
+  (delta) => {
+    console.log("Delta:", delta);
+    fullResponse += delta;
+  },
+  () => {
+    console.log("Stream ended. Full response:", fullResponse);
+  },
+  (errorData) => {
+    console.error("Stream Error:", errorData);
+  }
+);

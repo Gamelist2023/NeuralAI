@@ -1,0 +1,57 @@
+// JavaScript: 画像生成 (Base64取得)
+async function generateImageBase64(model, prompt, apiKey = null) {
+  const apiUrl = "http://127.0.0.1:9002/chat";
+  const payload = {
+    provider_name: null,
+    model: model,
+    message: prompt,
+    api_key: apiKey,
+    stream: false,
+    type: "image@b64"
+  };
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      let errorDetail = `HTTP error! status: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorDetail = errorData.detail || JSON.stringify(errorData);
+      } catch (e) {
+        errorDetail = await response.text();
+      }
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After');
+        if (retryAfter) {
+          errorDetail += ` (Retry after ${retryAfter} seconds)`;
+        }
+      }
+      throw new Error(errorDetail);
+    }
+
+    const data = await response.json();
+    return data.image_b64; // Returns the Base64 string
+
+  } catch (error) {
+    console.error("Error during image Base64 request:", error);
+    throw error;
+  }
+}
+
+// 使用例:
+generateImageBase64("flux", "A photorealistic image of a red apple on a wooden table")
+  .then(b64Data => {
+    console.log("Generated Image Base64 (first 100 chars):", b64Data.substring(0, 100) + "...");
+    // You can use this data directly in an img tag:
+    // const imgElement = document.createElement('img');
+    // imgElement.src = `data:image/png;base64,${b64Data}`; // Assuming PNG format
+    // document.body.appendChild(imgElement);
+  })
+  .catch(error => console.error("Image Generation Error:", error.message));

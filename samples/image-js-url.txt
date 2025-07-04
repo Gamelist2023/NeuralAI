@@ -1,0 +1,52 @@
+// JavaScript: 画像生成 (URL取得)
+async function generateImageURL(model, prompt, apiKey = null) {
+  const apiUrl = "http://127.0.0.1:9002/chat";
+  const payload = {
+    provider_name: null, // Provider often inferred from model for images
+    model: model,
+    message: prompt, // Use message as prompt
+    api_key: apiKey,
+    stream: false, // Ignored for image generation
+    type: "image@url"
+  };
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      let errorDetail = `HTTP error! status: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorDetail = errorData.detail || JSON.stringify(errorData);
+      } catch (e) {
+        errorDetail = await response.text();
+      }
+      // Include Retry-After header info if it's a 429 error
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After');
+        if (retryAfter) {
+          errorDetail += ` (Retry after ${retryAfter} seconds)`;
+        }
+      }
+      throw new Error(errorDetail);
+    }
+
+    const data = await response.json();
+    return data.image_url;
+
+  } catch (error) {
+    console.error("Error during image URL request:", error);
+    throw error;
+  }
+}
+
+// 使用例:
+generateImageURL("flux", "A cat wearing sunglasses riding a skateboard")
+  .then(imageUrl => console.log("Generated Image URL:", imageUrl))
+  .catch(error => console.error("Image Generation Error:", error.message));

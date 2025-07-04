@@ -1,0 +1,81 @@
+# Python: チャット (ストリーミング) - SSEClientなし・標準ライブラリのみ
+import requests
+import json
+from typing import Optional
+
+def chat_with_ai_stream(provider_name: Optional[str], model: str, message: str, api_key: Optional[str] = None):
+    url = "http://127.0.0.1:9002/chat"
+    headers = {'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
+    data = {
+        "provider_name": provider_name,
+        "model": model,
+        "message": message,
+        "api_key": api_key,
+        "stream": True,
+        "type": "chat"
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data, stream=True)
+        response.raise_for_status() # Check before processing stream
+
+        full_response_text = ""
+        buffer = ""
+        for line in response.iter_lines(decode_unicode=True):
+            if line is None:
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("data:"):
+                buffer += line[5:].lstrip()
+                # SSE: イベントが複数行にまたがる場合もあるので、\nで区切る
+                try:
+                    data_dict = json.loads(buffer)
+                    buffer = ""
+                except json.JSONDecodeError:
+                    # 続きが来るまで待つ
+                    continue
+
+                if 'delta' in data_dict:
+                    delta = data_dict['delta']
+                    print(delta, end='', flush=True)
+                    full_response_text += delta
+                elif 'end_of_stream' in data_dict and data_dict['end_of_stream']:
+                    print("\n--- End of Stream ---")
+                    break
+                elif 'error' in data_dict:
+                    print(f"\n--- Stream Error Received ---")
+                    print(f"Status Code: {data_dict.get('status_code', 'N/A')}")
+                    print(f"Error: {data_dict.get('error', 'Unknown error')}")
+                    print(f"Provider: {data_dict.get('provider', 'N/A')}")
+                    print(f"Model: {data_dict.get('model', 'N/A')}")
+                    print(f"-----------------------------")
+                    return None
+
+        return full_response_text
+
+    except requests.exceptions.RequestException as e:
+        print(f"\nRequest failed: {e}")
+        if e.response is not None:
+            try:
+                print(f"Error response: {e.response.json()}")
+            except json.JSONDecodeError:
+                print(f"Error response (text): {e.response.text}")
+        return None
+    except Exception as e:
+        print(f"\nAn unexpected error occurred during streaming: {e}")
+        return None
+
+# 使用例 1: プロバイダー指定
+print("\n--- Streaming Chat (Gemini) ---")
+try:
+    full_response = chat_with_ai_stream("Gemini", "gemini-1.5-flash", "Pythonで簡単なWebサーバーを立てるコードを教えてください。")
+except Exception as e:
+    print(f"\nAn error occurred (Gemini Stream): {e}")
+
+# 使用例 2: プロバイダー指定なし (デフォルトを使用)
+print("\n--- Streaming Chat (Default) ---")
+try:
+    full_response = chat_with_ai_stream(None, "gpt-4o-mini", "簡単な挨拶をストリーミングで返してください。")
+except Exception as e:
+    print(f"\nAn error occurred (Default Stream): {e}")

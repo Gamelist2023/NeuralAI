@@ -1,0 +1,50 @@
+// JavaScript: チャット (非ストリーミング)
+async function chatWithAI(providerName, model, message, apiKey = null) {
+  const apiUrl = "http://127.0.0.1:9002/chat";
+  const payload = {
+    provider_name: providerName, // null or provider name string
+    model: model,
+    message: message,
+    api_key: apiKey,
+    stream: false,
+    type: "chat" // Explicitly set type for clarity
+  };
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      let errorDetail = `HTTP error! status: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorDetail = errorData.detail || JSON.stringify(errorData);
+      } catch (e) {
+        errorDetail = await response.text();
+      }
+      throw new Error(errorDetail);
+    }
+
+    const data = await response.json();
+    return data.response;
+
+  } catch (error) {
+    console.error("Error during chat request:", error);
+    throw error;
+  }
+}
+
+// 使用例 1: プロバイダー指定
+chatWithAI("Gemini", "gemini-1.5-flash", "こんにちは")
+  .then(response => console.log("AI Response (Gemini):", response))
+  .catch(error => console.error("Error (Gemini):", error.message));
+
+// 使用例 2: プロバイダー指定なし (デフォルトを使用)
+chatWithAI(null, "gpt-4o-mini", "デフォルトプロバイダーで挨拶して")
+  .then(response => console.log("AI Response (Default):", response))
+  .catch(error => console.error("Error (Default):", error.message));

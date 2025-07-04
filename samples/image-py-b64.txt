@@ -1,0 +1,58 @@
+# Python: 画像生成 (Base64取得)
+import requests
+import json
+from typing import Optional
+import base64 # For potentially saving the image
+
+def generate_image_base64(model: str, prompt: str, api_key: Optional[str] = None):
+    url = "http://127.0.0.1:9002/chat"
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "model": model,
+        "message": prompt,
+        "api_key": api_key,
+        "type": "image@b64"
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        return response.json()['image_b64'] # Returns the Base64 string
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+        if e.response is not None:
+            try:
+                error_details = e.response.json()
+                print(f"Error response: {error_details}")
+                if e.response.status_code == 429:
+                    retry_after = e.response.headers.get('Retry-After')
+                    if retry_after:
+                        print(f"Rate limit hit. Retry after {retry_after} seconds.")
+            except json.JSONDecodeError:
+                print(f"Error response (text): {e.response.text}")
+        return None
+    except KeyError:
+        print(f"Error: 'image_b64' key not found in the JSON response.")
+        try:
+            print(f"Received JSON: {response.json()}")
+        except json.JSONDecodeError:
+            print(f"Received non-JSON response: {response.text}")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return None
+
+# 使用例:
+try:
+    b64_data = generate_image_base64("flux", "A cute robot waving hello")
+    if b64_data:
+        print("Generated Image Base64 (first 100 chars):", b64_data[:100] + "...")
+        # Optional: Save the image to a file
+        # try:
+        #     image_data = base64.b64decode(b64_data)
+        #     with open("generated_image.png", "wb") as f: # Assuming PNG format
+        #         f.write(image_data)
+        #     print("Image saved as generated_image.png")
+        # except Exception as save_e:
+        #     print(f"Error saving image: {save_e}")
+except Exception as e:
+    print(f"An error occurred during image generation: {e}")
