@@ -95,6 +95,7 @@ curl -X POST http://127.0.0.1:9002/models -H "Content-Type: application/json" -d
   "provider_name": "string (必須)",
   "model": "string (必須)",
   "message": "string (必須)",
+  "api_key": "string (optional)",
   "auth_key": "string (optional, 現在未使用)",
   "stream": "boolean (optional, default: false)"
 }
@@ -103,6 +104,7 @@ curl -X POST http://127.0.0.1:9002/models -H "Content-Type: application/json" -d
 - `provider_name`: 使用する AI プロバイダーの識別子 (例: "Grok")。`/models` エンドポイントで取得した名前を指定します。
 - `model`: 使用するモデル名 (例: "grok-3" や "" など、プロバイダーがサポートするモデル識別子)。空文字列 "" を指定すると、プロバイダーのデフォルトモデルが使用される場合があります。
 - `message`: AI に送信するユーザーメッセージ。
+- `api_key`: 一部のプロバイダー/モデルで必要なAPIキー。クライアントから渡すと、そのままプロバイダーに渡されます。
 - `auth_key`: 認証キー（現在のバージョンでは使用されていません）。
 - `stream`: `true` に設定するとレスポンスがストリーミング (SSE) 形式になります。`false` または未指定の場合は、完了後に全レスポンスが JSON で返されます。
 
@@ -110,10 +112,11 @@ curl -X POST http://127.0.0.1:9002/models -H "Content-Type: application/json" -d
 
 Content-Type: application/json
 ボディ: AI からの完全な応答を含む JSON オブジェクト。
-json
+```json
 {
-"response": "AI からの応答テキストです。"
+  "response": "AI からの応答テキストです。"
 }
+```
 
 **成功レスポンス (200 OK, stream=true):**
 
@@ -202,6 +205,7 @@ Content-Type: text/event-stream
         "provider_name": "Grok",
         "model": "grok-3",
         "message": "日本の首都はどこですか？",
+        "api_key": "<APIキーが必要な場合はここに指定>",
         "stream": false
       }'
   ```
@@ -216,6 +220,7 @@ Content-Type: text/event-stream
         "provider_name": "Grok",
         "model": "grok-3",
         "message": "自己紹介をしてください。",
+        "api_key": "<APIキーが必要な場合はここに指定>",
         "stream": true
       }' --no-buffer
   ```

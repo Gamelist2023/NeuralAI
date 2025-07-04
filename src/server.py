@@ -277,19 +277,26 @@ def generate_image_sync(
             raise e
 
     try:
-        loop = asyncio.get_running_loop()
-        return loop.run_until_complete(_generate())
-    except RuntimeError as e:
-        print(
-            f"Asyncio runtime error in image generation thread (fallback to asyncio.run): {e}"
-        )
         try:
-            return asyncio.run(_generate())
-        except RuntimeError as e2:
-            print(f"Fallback asyncio.run also failed: {e2}")
-            raise RuntimeError(
-                "Failed to run async image generation in sync wrapper."
-            ) from e2
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            # 別スレッドで新しいイベントループを作成して実行
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(lambda: asyncio.run(_generate()))
+                return future.result()
+        else:
+            if not loop or loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            return loop.run_until_complete(_generate())
+    except Exception as e:
+        print(f"Asyncio error in image generation thread: {e}")
+        raise RuntimeError(
+            "Failed to run async image generation in sync wrapper."
+        ) from e
 
 async def stream_response_generator(
     prov_class: Optional[Type[BaseProvider]],
