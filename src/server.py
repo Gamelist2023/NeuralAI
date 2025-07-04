@@ -141,7 +141,7 @@ def download_and_sync_gdrive_folder(folder_url: str, output_dir: str) -> bool:
             print("-" * 30)
             return False
 
-README_URL = "https://raw.githubusercontent.com/gamelist1990/ClientBedrock/refs/heads/main/other/AISystem/index.html"
+README_URL = "https://gamelist2023.github.io/NeuralAI/README.html"
 
 @app.get("/", response_class=HTMLResponse)
 async def get_readme():

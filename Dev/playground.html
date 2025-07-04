@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NeuralAI Playground</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>NeuralAI Playground</h1>
+    <p>エンドポイント: <code>https://neuralai-jbwc.onrender.com</code></p>
+  </header>
+  <div class="toggle-mode-bar">
+    <button id="toggle-mode-btn" type="button">開発者モードに切り替え</button>
+  </div>
+  <main>
+    <div id="chat-demo">
+      <h2>💬 チャットデモ</h2>
+      <form id="chat-form">
+        <div class="form-group">
+          <label for="chat-model">AIモデル</label>
+          <select id="chat-model" title="モデル選択">
+            <option value="gpt-4o-mini">gpt-4o-mini (推奨/高速)</option>
+          </select>
+        </div>
+        <div class="message-input-group">
+          <input id="chat-message" type="text" placeholder="AIに話しかけてみよう！">
+          <button type="submit" aria-label="送信">送信</button>
+        </div>
+      </form>
+      <div id="chat-log"></div>
+      <div class="chat-note">※AI応答はストリーミングで返されます</div>
+    </div>
+    <div id="dev-panel">
+      <div class="endpoint-select">
+        <label for="endpoint">エンドポイント選択</label>
+        <select id="endpoint"></select>
+        <span id="method-label"></span>
+      </div>
+      <div>
+        <label for="url-input">リクエストURL</label>
+        <input id="url-input" type="text" readonly>
+      </div>
+      <div>
+        <label for="request-area">リクエストボディ (JSON)</label>
+        <textarea id="request-area" rows="8" placeholder='{"model": "gpt-4o-mini", "message": "こんにちは"}'></textarea>
+      </div>
+      <button id="send-btn">リクエスト送信</button>
+      <div class="response-area" id="response-area">レスポンスがここに表示されます</div>
+    </div>
+  </main>
+  <script src="index.js"></script>
+</body>
+</html>
